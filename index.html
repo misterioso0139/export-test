@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>篩選偵測與匯出</title>
+<title>切片器連動測試</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -12,196 +12,175 @@
     background: transparent !important;
     font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   }
-  body { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
-  h3 { margin: 0; font-size: 15px; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+
+  /* 展示狀態：只有一個大數字，方便切換切片器時盯著看 */
+  #big { display: none; flex: 1; flex-direction: column;
+         align-items: center; justify-content: center; gap: 6px; }
+  #big.show { display: flex; }
+  #count { font-size: 56px; font-weight: 700; line-height: 1; }
+  #countLabel { font-size: 13px; color: #888; }
+  #stamp { font-size: 11px; color: #aaa; }
+
+  /* 設定狀態 */
+  #cfg { display: none; flex-direction: column; gap: 12px; }
+  #cfg.show { display: flex; }
+  label { display: block; margin-bottom: 5px; color: #666; font-size: 13px; }
   select {
-    padding: 7px 8px; font-size: 13px; min-width: 150px;
+    width: 100%; padding: 7px 8px; font-size: 13px;
     border: 1px solid rgba(128,128,128,.4); border-radius: 5px;
     background: transparent; color: inherit;
   }
   button {
-    padding: 8px 14px; border: none; border-radius: 5px;
-    background: #3370ff; color: #fff; font-size: 13px; cursor: pointer;
+    padding: 9px 16px; border: none; border-radius: 5px;
+    background: #3370ff; color: #fff; font-size: 14px; cursor: pointer;
   }
-  button.alt { background: #6b7280; }
-  button:disabled { opacity: .45; cursor: default; }
   .tip { font-size: 12px; color: #888; line-height: 1.6; }
   #log {
-    flex: 1; min-height: 0; overflow: auto;
-    font-size: 12px; line-height: 1.7; white-space: pre-wrap;
-    border: 1px solid rgba(128,128,128,.25); border-radius: 6px;
-    padding: 12px; background: rgba(128,128,128,.05);
+    font-size: 11px; line-height: 1.7; white-space: pre-wrap;
+    max-height: 160px; overflow: auto; color: #667085;
+    border-top: 1px solid rgba(128,128,128,.2); padding-top: 8px;
   }
-  .ok   { color: #1a7f37; }
-  .bad  { color: #b42318; }
-  .head { color: #3370ff; font-weight: 600; }
+  .bad { color: #b42318; }
+  .ok  { color: #1a7f37; }
 </style>
 </head>
 <body>
 
-<h3>篩選偵測與匯出</h3>
-
-<div class="row">
-  <select id="tableSel"></select>
-  <select id="viewSel"></select>
-  <button id="btnProbe" class="alt">偵測目前狀態</button>
-  <button id="btnExport">匯出目前顯示內容</button>
+<div id="big">
+  <div id="count">—</div>
+  <div id="countLabel">getData() 回傳的筆數</div>
+  <div id="stamp"></div>
 </div>
 
-<div class="tip">
-  測試方法：先按「偵測目前狀態」記下筆數 → 到上面切換一個 BU 按鈕 → 再按一次「偵測目前狀態」。
-  如果筆數跟著變，代表插件看得到你的篩選。
+<div id="cfg">
+  <div class="tip">
+    選一個「每筆記錄都不一樣」的欄位當分組依據（例如 UID）。
+    這樣 getData() 回傳的列數就等於通過篩選的記錄數。
+  </div>
+  <div><label for="tableSel">資料表</label><select id="tableSel"></select></div>
+  <div><label for="fieldSel">分組欄位（建議選 UID）</label><select id="fieldSel"></select></div>
+  <button id="save">儲存並套用</button>
 </div>
 
-<div id="log">準備中…</div>
-
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<div id="log"></div>
 
 <script type="module">
-import { bitable } from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm';
+import { bitable, dashboard, DashboardState, SourceType }
+  from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm';
 
-const logEl = document.getElementById('log');
-const tableSel = document.getElementById('tableSel');
-const viewSel = document.getElementById('viewSel');
-const btnProbe = document.getElementById('btnProbe');
-const btnExport = document.getElementById('btnExport');
+const $ = id => document.getElementById(id);
+const big = $('big'), cfg = $('cfg'), countEl = $('count'), stampEl = $('stamp');
+const tableSel = $('tableSel'), fieldSel = $('fieldSel'), saveBtn = $('save');
+const logEl = $('log');
 
-let first = true;
-function log(t, cls) {
-  if (first) { logEl.textContent = ''; first = false; }
-  const s = document.createElement('span');
-  if (cls) s.className = cls;
-  s.textContent = t + '\n';
-  logEl.appendChild(s);
+const lines = [];
+function say(t, cls) {
+  lines.push(cls ? `<span class="${cls}">${t}</span>` : t);
+  if (lines.length > 8) lines.shift();
+  logEl.innerHTML = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
+window.addEventListener('unhandledrejection', e => {
+  const m = e.reason?.message || String(e.reason);
+  if (!/ResizeObserver/.test(m)) say('未處理：' + m, 'bad');
+});
 
-function toText(v) {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'string' || typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? '是' : '否';
-  if (Array.isArray(v)) {
-    return v.map(x => typeof x === 'string' ? x
-      : (x?.text ?? x?.name ?? x?.enName ?? '')).filter(Boolean).join(', ');
+const condition = (tableId, fieldId) => ({
+  tableId,
+  dataRange: { type: SourceType.ALL },
+  groups: [{ fieldId }],
+  series: 'COUNTA'
+});
+
+// ---------- 設定狀態 ----------
+async function setupConfig() {
+  cfg.classList.add('show');
+  const tables = await bitable.base.getTableMetaList();
+  for (const t of tables) tableSel.add(new Option(t.name, t.id));
+
+  let saved = null;
+  if (dashboard.state !== DashboardState.Create) {
+    saved = await dashboard.getConfig().catch(() => null);
   }
-  if (typeof v === 'object') {
-    if (v.text !== undefined) return String(v.text);
-    if (v.name !== undefined) return String(v.name);
-    if (v.value !== undefined) return toText(v.value);
-    return '';
+  const c = saved?.customConfig;
+  if (c?.tableId && [...tableSel.options].some(o => o.value === c.tableId)) {
+    tableSel.value = c.tableId;
   }
-  return String(v);
+  await loadFields(c?.fieldId);
 }
 
-// ---------- 偵測 ----------
-btnProbe.onclick = async () => {
-  btnProbe.disabled = true;
-  try {
-    log('──────── 偵測 ' + new Date().toLocaleTimeString() + ' ────────', 'head');
+async function loadFields(prefer) {
+  fieldSel.innerHTML = '';
+  const cats = await dashboard.getCategories(tableSel.value);
+  for (const c of cats) fieldSel.add(new Option(c.fieldName, c.fieldId));
 
-    // 插件當下認為使用者在看哪張表 / 哪個視圖
-    const sel = await bitable.base.getSelection();
-    log(`getSelection：tableId=${sel.tableId || '無'} viewId=${sel.viewId || '無'}`);
-
-    const table = await bitable.base.getTableById(tableSel.value);
-    const view  = await table.getViewById(viewSel.value);
-
-    // 視圖層級的篩選條件
-    const filterInfo = await view.getFilterInfo().catch(e => ({ err: e.message }));
-    log('視圖篩選條件：' + JSON.stringify(filterInfo));
-
-    // 篩選後看得到的記錄
-    const visible = await view.getVisibleRecordIdList();
-    const total   = await table.getRecordIdList();
-    log(`可見記錄：${visible.length} 筆　／　全表：${total.length} 筆`,
-        visible.length < total.length ? 'ok' : undefined);
-
-    const visFields = await view.getVisibleFieldIdList();
-    const allFields = await table.getFieldMetaList();
-    log(`可見欄位：${visFields.length} 欄　／　全部：${allFields.length} 欄`);
-
-    if (visible.length < total.length) {
-      log('→ 有篩選生效，插件看得到。', 'ok');
-    } else {
-      log('→ 目前可見等於全表。切換 BU 後再測一次，看數字會不會變。');
-    }
-  } catch (e) {
-    log('偵測失敗：' + e.message, 'bad');
+  // 沒指定的話，優先挑名字含 UID 的欄位
+  const uid = [...fieldSel.options].find(o => /uid|編號|id/i.test(o.text));
+  if (prefer && [...fieldSel.options].some(o => o.value === prefer)) {
+    fieldSel.value = prefer;
+  } else if (uid) {
+    fieldSel.value = uid.value;
   }
-  btnProbe.disabled = false;
-};
-
-// ---------- 匯出 ----------
-btnExport.onclick = async () => {
-  btnExport.disabled = true;
-  try {
-    const table = await bitable.base.getTableById(tableSel.value);
-    const view  = await table.getViewById(viewSel.value);
-
-    log('讀取可見記錄…');
-    const recIds = (await view.getVisibleRecordIdList()).filter(Boolean);
-    const fieldIds = await view.getVisibleFieldIdList();
-    const metas = await table.getFieldMetaList();
-    const nameOf = Object.fromEntries(metas.map(m => [m.id, m.name]));
-
-    log(`${recIds.length} 筆 × ${fieldIds.length} 欄，讀取中…`);
-
-    // 一次抓整筆記錄，比一個欄位讀一次快得多
-    const rows = [fieldIds.map(id => nameOf[id] || id)];
-    for (let i = 0; i < recIds.length; i += 100) {
-      const batch = await table.getRecordsByIds(recIds.slice(i, i + 100));
-      for (const rec of batch) {
-        rows.push(fieldIds.map(fid => toText(rec.fields?.[fid])));
-      }
-      log(`  已讀 ${Math.min(i + 100, recIds.length)} / ${recIds.length}`);
-    }
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '匯出');
-
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '');
-    XLSX.writeFile(wb, `${tableSel.options[tableSel.selectedIndex].text}_${stamp}.xlsx`);
-
-    log(`✓ 已匯出 ${rows.length - 1} 筆`, 'ok');
-  } catch (e) {
-    log('匯出失敗：' + e.message, 'bad');
-  }
-  btnExport.disabled = false;
-};
-
-// ---------- 啟動 ----------
-async function loadViews() {
-  viewSel.innerHTML = '';
-  const table = await bitable.base.getTableById(tableSel.value);
-  const views = await table.getViewMetaList();
-  for (const v of views) viewSel.add(new Option(v.name, v.id));
-
-  // 盡量對齊使用者正在看的視圖
-  const sel = await bitable.base.getSelection();
-  if (sel.viewId && [...viewSel.options].some(o => o.value === sel.viewId)) {
-    viewSel.value = sel.viewId;
-  }
+  await previewCount();
 }
 
-(async () => {
+async function previewCount() {
+  if (!tableSel.value || !fieldSel.value) return;
   try {
-    const tables = await bitable.base.getTableMetaList();
-    for (const t of tables) tableSel.add(new Option(t.name, t.id));
+    const data = await dashboard.getPreviewData(
+      condition(tableSel.value, fieldSel.value));
+    say(`預覽：${Math.max(0, (data?.length || 0) - 1)} 列`, 'ok');
+  } catch (e) { say('預覽失敗：' + e.message, 'bad'); }
+}
 
-    const sel = await bitable.base.getSelection();
-    if (sel.tableId && [...tableSel.options].some(o => o.value === sel.tableId)) {
-      tableSel.value = sel.tableId;
-    }
-    await loadViews();
-    tableSel.onchange = () => loadViews().catch(e => log(e.message, 'bad'));
+tableSel.onchange = () => loadFields();
+fieldSel.onchange = previewCount;
 
-    log('已連上 Lark。請選好資料表與視圖，然後按「偵測目前狀態」。', 'ok');
+saveBtn.onclick = async () => {
+  saveBtn.disabled = true;
+  try {
+    await dashboard.saveConfig({
+      dataConditions: [condition(tableSel.value, fieldSel.value)],
+      customConfig: { tableId: tableSel.value, fieldId: fieldSel.value }
+    });
+  } catch (e) { say('存檔失敗：' + e.message, 'bad'); saveBtn.disabled = false; }
+};
+
+// ---------- 展示狀態 ----------
+function paint(data, source) {
+  const n = Math.max(0, (data?.length || 0) - 1);
+  countEl.textContent = n;
+  stampEl.textContent = `${source}　${new Date().toLocaleTimeString()}`;
+}
+
+async function showCount() {
+  cfg.classList.remove('show');
+  big.classList.add('show');
+  try {
+    paint(await dashboard.getData(), 'getData');
+    say('✓ getData 成功', 'ok');
   } catch (e) {
-    log('初始化失敗：' + e.message, 'bad');
+    countEl.textContent = '✗';
+    stampEl.textContent = e.message;
+    say('getData 失敗：' + e.message, 'bad');
   }
-})();
+  dashboard.setRendered().catch(() => {});
+}
+
+if (dashboard.state === DashboardState.Create ||
+    dashboard.state === DashboardState.Config) {
+  setupConfig().catch(e => say('初始化失敗：' + e.message, 'bad'));
+} else {
+  showCount();
+}
+
+// 這個才是重點：切片器如果有連動，這裡會被觸發
+dashboard.onDataChange(({ data }) => {
+  paint(data, 'onDataChange');
+  say('★ onDataChange 觸發了，筆數 ' + Math.max(0, (data?.length || 0) - 1), 'ok');
+});
+dashboard.onConfigChange(() => showCount());
 </script>
 
 </body>
