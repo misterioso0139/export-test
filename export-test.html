@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>匯出 XLSX 測試</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: transparent !important;
+    font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  }
+  body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  h3 { margin: 0; font-size: 15px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  select {
+    padding: 7px 8px; font-size: 13px; min-width: 160px;
+    border: 1px solid rgba(128,128,128,.4); border-radius: 5px;
+    background: transparent; color: inherit;
+  }
+  button {
+    padding: 9px 16px; border: none; border-radius: 5px;
+    background: #3370ff; color: #fff; font-size: 13px; cursor: pointer;
+  }
+  button.alt { background: #6b7280; }
+  button:disabled { opacity: .45; cursor: default; }
+  #log {
+    flex: 1; min-height: 0; overflow: auto;
+    font-size: 12px; line-height: 1.7; white-space: pre-wrap;
+    border: 1px solid rgba(128,128,128,.25); border-radius: 6px;
+    padding: 12px; background: rgba(128,128,128,.05);
+  }
+  .ok  { color: #1a7f37; }
+  .bad { color: #b42318; }
+</style>
+</head>
+<body>
+
+<h3>匯出 XLSX 可行性測試</h3>
+
+<div class="row">
+  <select id="tableSel"></select>
+  <button id="btnDownload">方法一：直接下載</button>
+  <button id="btnUpload" class="alt">方法二：上傳成附件</button>
+</div>
+
+<div id="log">準備中…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<script type="module">
+import { bitable } from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm';
+
+const logEl = document.getElementById('log');
+const tableSel = document.getElementById('tableSel');
+const btnDownload = document.getElementById('btnDownload');
+const btnUpload = document.getElementById('btnUpload');
+
+let first = true;
+function log(text, cls) {
+  if (first) { logEl.textContent = ''; first = false; }
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text + '\n';
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------- 先偵測 iframe 有沒有下載權限 ----------
+function checkSandbox() {
+  const flags = window.frameElement?.sandbox;   // 跨來源時通常讀不到
+  if (flags) {
+    log('iframe sandbox：' + flags.value);
+    log(flags.contains('allow-downloads')
+      ? '✓ 有 allow-downloads 權限' : '✗ 沒有 allow-downloads 權限', 
+      flags.contains('allow-downloads') ? 'ok' : 'bad');
+  } else {
+    log('讀不到 sandbox 設定（跨來源限制），只能實測。');
+  }
+}
+
+// ---------- 把整張表讀成二維陣列 ----------
+function toText(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? '是' : '否';
+  if (Array.isArray(v)) {
+    return v.map(x => typeof x === 'string' ? x : (x?.text ?? x?.name ?? '')).filter(Boolean).join(', ');
+  }
+  if (typeof v === 'object') return v.text ?? v.name ?? '';
+  return String(v);
+}
+
+async function buildRows(tableId) {
+  const table  = await bitable.base.getTableById(tableId);
+  const fields = await table.getFieldMetaList();
+  const header = fields.map(f => f.name);
+
+  // 每個欄位各讀一次，再用 recordId 對起來
+  const cols = [];
+  for (const f of fields) {
+    const field = await table.getFieldById(f.id);
+    const map = new Map();
+    let pageToken, hasMore = true, guard = 0;
+    while (hasMore && guard++ < 50) {
+      const res = await field.getFieldValueListByPage({ pageSize: 200, pageToken });
+      for (const it of (res.fieldValues || [])) map.set(it.recordId, it.value);
+      hasMore = res.hasMore; pageToken = res.pageToken;
+    }
+    cols.push(map);
+  }
+
+  const recIds = [...new Set(cols.flatMap(m => [...m.keys()]))];
+  const rows = [header];
+  for (const id of recIds) rows.push(cols.map(m => toText(m.get(id))));
+  return rows;
+}
+
+function makeWorkbook(rows) {
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '資料');
+  return wb;
+}
+
+// ---------- 方法一：瀏覽器直接下載 ----------
+btnDownload.onclick = async () => {
+  btnDownload.disabled = true;
+  try {
+    log('讀取資料中…');
+    const rows = await buildRows(tableSel.value);
+    log(`讀到 ${rows.length - 1} 筆、${rows[0].length} 欄`);
+
+    const wb = makeWorkbook(rows);
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type:
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '匯出測試.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    log('已觸發下載。', 'ok');
+    log('→ 如果檔案總管出現「匯出測試.xlsx」，代表這條路可行。');
+    log('→ 如果什麼都沒發生，代表 iframe 被禁止下載，要改用方法二。', 'bad');
+  } catch (e) {
+    log('失敗：' + e.message, 'bad');
+  }
+  btnDownload.disabled = false;
+};
+
+// ---------- 方法二：上傳成附件 ----------
+btnUpload.onclick = async () => {
+  btnUpload.disabled = true;
+  try {
+    log('讀取資料中…');
+    const rows = await buildRows(tableSel.value);
+    const wb = makeWorkbook(rows);
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+
+    const file = new File([out], '匯出測試.xlsx', { type:
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+
+    log('上傳中…');
+    const tokens = await bitable.base.batchUploadFile([file]);
+    log('✓ 上傳成功，fileToken：' + tokens[0], 'ok');
+    log('→ 檔案已經在 Lark 伺服器上。');
+    log('→ 接下來要把這個 token 寫進某個附件欄位，使用者才點得到。');
+  } catch (e) {
+    log('失敗：' + e.message, 'bad');
+  }
+  btnUpload.disabled = false;
+};
+
+// ---------- 啟動 ----------
+(async () => {
+  try {
+    checkSandbox();
+    log('SheetJS：' + (typeof XLSX !== 'undefined' ? '已載入' : '未載入'),
+        typeof XLSX !== 'undefined' ? 'ok' : 'bad');
+    const tables = await bitable.base.getTableMetaList();
+    for (const t of tables) tableSel.add(new Option(t.name, t.id));
+    log(`已連上 Lark，${tables.length} 張資料表可選。`, 'ok');
+    log('選一張表，然後按上面兩個按鈕測試。');
+  } catch (e) {
+    log('初始化失敗：' + e.message, 'bad');
+  }
+})();
+</script>
+
+</body>
+</html>
