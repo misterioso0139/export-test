@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>匯出 XLSX 測試</title>
+<title>篩選偵測與匯出</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -12,38 +12,46 @@
     background: transparent !important;
     font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   }
-  body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  body { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
   h3 { margin: 0; font-size: 15px; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   select {
-    padding: 7px 8px; font-size: 13px; min-width: 160px;
+    padding: 7px 8px; font-size: 13px; min-width: 150px;
     border: 1px solid rgba(128,128,128,.4); border-radius: 5px;
     background: transparent; color: inherit;
   }
   button {
-    padding: 9px 16px; border: none; border-radius: 5px;
+    padding: 8px 14px; border: none; border-radius: 5px;
     background: #3370ff; color: #fff; font-size: 13px; cursor: pointer;
   }
   button.alt { background: #6b7280; }
   button:disabled { opacity: .45; cursor: default; }
+  .tip { font-size: 12px; color: #888; line-height: 1.6; }
   #log {
     flex: 1; min-height: 0; overflow: auto;
     font-size: 12px; line-height: 1.7; white-space: pre-wrap;
     border: 1px solid rgba(128,128,128,.25); border-radius: 6px;
     padding: 12px; background: rgba(128,128,128,.05);
   }
-  .ok  { color: #1a7f37; }
-  .bad { color: #b42318; }
+  .ok   { color: #1a7f37; }
+  .bad  { color: #b42318; }
+  .head { color: #3370ff; font-weight: 600; }
 </style>
 </head>
 <body>
 
-<h3>匯出 XLSX 可行性測試</h3>
+<h3>篩選偵測與匯出</h3>
 
 <div class="row">
   <select id="tableSel"></select>
-  <button id="btnDownload">方法一：直接下載</button>
-  <button id="btnUpload" class="alt">方法二：上傳成附件</button>
+  <select id="viewSel"></select>
+  <button id="btnProbe" class="alt">偵測目前狀態</button>
+  <button id="btnExport">匯出目前顯示內容</button>
+</div>
+
+<div class="tip">
+  測試方法：先按「偵測目前狀態」記下筆數 → 到上面切換一個 BU 按鈕 → 再按一次「偵測目前狀態」。
+  如果筆數跟著變，代表插件看得到你的篩選。
 </div>
 
 <div id="log">準備中…</div>
@@ -55,140 +63,141 @@ import { bitable } from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0
 
 const logEl = document.getElementById('log');
 const tableSel = document.getElementById('tableSel');
-const btnDownload = document.getElementById('btnDownload');
-const btnUpload = document.getElementById('btnUpload');
+const viewSel = document.getElementById('viewSel');
+const btnProbe = document.getElementById('btnProbe');
+const btnExport = document.getElementById('btnExport');
 
 let first = true;
-function log(text, cls) {
+function log(t, cls) {
   if (first) { logEl.textContent = ''; first = false; }
-  const span = document.createElement('span');
-  if (cls) span.className = cls;
-  span.textContent = text + '\n';
-  logEl.appendChild(span);
+  const s = document.createElement('span');
+  if (cls) s.className = cls;
+  s.textContent = t + '\n';
+  logEl.appendChild(s);
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ---------- 先偵測 iframe 有沒有下載權限 ----------
-function checkSandbox() {
-  const flags = window.frameElement?.sandbox;   // 跨來源時通常讀不到
-  if (flags) {
-    log('iframe sandbox：' + flags.value);
-    log(flags.contains('allow-downloads')
-      ? '✓ 有 allow-downloads 權限' : '✗ 沒有 allow-downloads 權限', 
-      flags.contains('allow-downloads') ? 'ok' : 'bad');
-  } else {
-    log('讀不到 sandbox 設定（跨來源限制），只能實測。');
-  }
-}
-
-// ---------- 把整張表讀成二維陣列 ----------
 function toText(v) {
   if (v === null || v === undefined) return '';
   if (typeof v === 'string' || typeof v === 'number') return String(v);
   if (typeof v === 'boolean') return v ? '是' : '否';
   if (Array.isArray(v)) {
-    return v.map(x => typeof x === 'string' ? x : (x?.text ?? x?.name ?? '')).filter(Boolean).join(', ');
+    return v.map(x => typeof x === 'string' ? x
+      : (x?.text ?? x?.name ?? x?.enName ?? '')).filter(Boolean).join(', ');
   }
-  if (typeof v === 'object') return v.text ?? v.name ?? '';
+  if (typeof v === 'object') {
+    if (v.text !== undefined) return String(v.text);
+    if (v.name !== undefined) return String(v.name);
+    if (v.value !== undefined) return toText(v.value);
+    return '';
+  }
   return String(v);
 }
 
-async function buildRows(tableId) {
-  const table  = await bitable.base.getTableById(tableId);
-  const fields = await table.getFieldMetaList();
-  const header = fields.map(f => f.name);
-
-  // 每個欄位各讀一次，再用 recordId 對起來
-  const cols = [];
-  for (const f of fields) {
-    const field = await table.getFieldById(f.id);
-    const map = new Map();
-    let pageToken, hasMore = true, guard = 0;
-    while (hasMore && guard++ < 50) {
-      const res = await field.getFieldValueListByPage({ pageSize: 200, pageToken });
-      for (const it of (res.fieldValues || [])) map.set(it.recordId, it.value);
-      hasMore = res.hasMore; pageToken = res.pageToken;
-    }
-    cols.push(map);
-  }
-
-  const recIds = [...new Set(cols.flatMap(m => [...m.keys()]))];
-  const rows = [header];
-  for (const id of recIds) rows.push(cols.map(m => toText(m.get(id))));
-  return rows;
-}
-
-function makeWorkbook(rows) {
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '資料');
-  return wb;
-}
-
-// ---------- 方法一：瀏覽器直接下載 ----------
-btnDownload.onclick = async () => {
-  btnDownload.disabled = true;
+// ---------- 偵測 ----------
+btnProbe.onclick = async () => {
+  btnProbe.disabled = true;
   try {
-    log('讀取資料中…');
-    const rows = await buildRows(tableSel.value);
-    log(`讀到 ${rows.length - 1} 筆、${rows[0].length} 欄`);
+    log('──────── 偵測 ' + new Date().toLocaleTimeString() + ' ────────', 'head');
 
-    const wb = makeWorkbook(rows);
-    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    const blob = new Blob([out], { type:
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    // 插件當下認為使用者在看哪張表 / 哪個視圖
+    const sel = await bitable.base.getSelection();
+    log(`getSelection：tableId=${sel.tableId || '無'} viewId=${sel.viewId || '無'}`);
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = '匯出測試.xlsx';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    const table = await bitable.base.getTableById(tableSel.value);
+    const view  = await table.getViewById(viewSel.value);
 
-    log('已觸發下載。', 'ok');
-    log('→ 如果檔案總管出現「匯出測試.xlsx」，代表這條路可行。');
-    log('→ 如果什麼都沒發生，代表 iframe 被禁止下載，要改用方法二。', 'bad');
+    // 視圖層級的篩選條件
+    const filterInfo = await view.getFilterInfo().catch(e => ({ err: e.message }));
+    log('視圖篩選條件：' + JSON.stringify(filterInfo));
+
+    // 篩選後看得到的記錄
+    const visible = await view.getVisibleRecordIdList();
+    const total   = await table.getRecordIdList();
+    log(`可見記錄：${visible.length} 筆　／　全表：${total.length} 筆`,
+        visible.length < total.length ? 'ok' : undefined);
+
+    const visFields = await view.getVisibleFieldIdList();
+    const allFields = await table.getFieldMetaList();
+    log(`可見欄位：${visFields.length} 欄　／　全部：${allFields.length} 欄`);
+
+    if (visible.length < total.length) {
+      log('→ 有篩選生效，插件看得到。', 'ok');
+    } else {
+      log('→ 目前可見等於全表。切換 BU 後再測一次，看數字會不會變。');
+    }
   } catch (e) {
-    log('失敗：' + e.message, 'bad');
+    log('偵測失敗：' + e.message, 'bad');
   }
-  btnDownload.disabled = false;
+  btnProbe.disabled = false;
 };
 
-// ---------- 方法二：上傳成附件 ----------
-btnUpload.onclick = async () => {
-  btnUpload.disabled = true;
+// ---------- 匯出 ----------
+btnExport.onclick = async () => {
+  btnExport.disabled = true;
   try {
-    log('讀取資料中…');
-    const rows = await buildRows(tableSel.value);
-    const wb = makeWorkbook(rows);
-    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const table = await bitable.base.getTableById(tableSel.value);
+    const view  = await table.getViewById(viewSel.value);
 
-    const file = new File([out], '匯出測試.xlsx', { type:
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    log('讀取可見記錄…');
+    const recIds = (await view.getVisibleRecordIdList()).filter(Boolean);
+    const fieldIds = await view.getVisibleFieldIdList();
+    const metas = await table.getFieldMetaList();
+    const nameOf = Object.fromEntries(metas.map(m => [m.id, m.name]));
 
-    log('上傳中…');
-    const tokens = await bitable.base.batchUploadFile([file]);
-    log('✓ 上傳成功，fileToken：' + tokens[0], 'ok');
-    log('→ 檔案已經在 Lark 伺服器上。');
-    log('→ 接下來要把這個 token 寫進某個附件欄位，使用者才點得到。');
+    log(`${recIds.length} 筆 × ${fieldIds.length} 欄，讀取中…`);
+
+    // 一次抓整筆記錄，比一個欄位讀一次快得多
+    const rows = [fieldIds.map(id => nameOf[id] || id)];
+    for (let i = 0; i < recIds.length; i += 100) {
+      const batch = await table.getRecordsByIds(recIds.slice(i, i + 100));
+      for (const rec of batch) {
+        rows.push(fieldIds.map(fid => toText(rec.fields?.[fid])));
+      }
+      log(`  已讀 ${Math.min(i + 100, recIds.length)} / ${recIds.length}`);
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '匯出');
+
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '');
+    XLSX.writeFile(wb, `${tableSel.options[tableSel.selectedIndex].text}_${stamp}.xlsx`);
+
+    log(`✓ 已匯出 ${rows.length - 1} 筆`, 'ok');
   } catch (e) {
-    log('失敗：' + e.message, 'bad');
+    log('匯出失敗：' + e.message, 'bad');
   }
-  btnUpload.disabled = false;
+  btnExport.disabled = false;
 };
 
 // ---------- 啟動 ----------
+async function loadViews() {
+  viewSel.innerHTML = '';
+  const table = await bitable.base.getTableById(tableSel.value);
+  const views = await table.getViewMetaList();
+  for (const v of views) viewSel.add(new Option(v.name, v.id));
+
+  // 盡量對齊使用者正在看的視圖
+  const sel = await bitable.base.getSelection();
+  if (sel.viewId && [...viewSel.options].some(o => o.value === sel.viewId)) {
+    viewSel.value = sel.viewId;
+  }
+}
+
 (async () => {
   try {
-    checkSandbox();
-    log('SheetJS：' + (typeof XLSX !== 'undefined' ? '已載入' : '未載入'),
-        typeof XLSX !== 'undefined' ? 'ok' : 'bad');
     const tables = await bitable.base.getTableMetaList();
     for (const t of tables) tableSel.add(new Option(t.name, t.id));
-    log(`已連上 Lark，${tables.length} 張資料表可選。`, 'ok');
-    log('選一張表，然後按上面兩個按鈕測試。');
+
+    const sel = await bitable.base.getSelection();
+    if (sel.tableId && [...tableSel.options].some(o => o.value === sel.tableId)) {
+      tableSel.value = sel.tableId;
+    }
+    await loadViews();
+    tableSel.onchange = () => loadViews().catch(e => log(e.message, 'bad'));
+
+    log('已連上 Lark。請選好資料表與視圖，然後按「偵測目前狀態」。', 'ok');
   } catch (e) {
     log('初始化失敗：' + e.message, 'bad');
   }
